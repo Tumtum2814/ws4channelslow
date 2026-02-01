@@ -84,14 +84,49 @@ Environment Variables
 	•  WS4KP_HOST: Host running WS4KP (default: localhost)
  
 	•  WS4KP_PORT: Port for WS4KP (default: 8080)
+
+	•  WS4KP_QUERY: Optional [ws4kp](https://github.com/netbymatt/ws4kp) query string (same as permalink params). Appended when loading the weather page. Examples: `kiosk=true`, `settings-units-select=metric`, `settings-wide-checkbox=true`, `settings-speed-select=0.75`, or combine: `kiosk=true&settings-units-select=metric&hazards-checkbox=false`. See ws4kp README for all options (permalink, checkboxes, speed, widescreen, etc.).
  
 	•  --cpus: CPU limit (default: 1.0)
  
 	•  --memory: RAM limit in MB (default: 1096)
  
-	•  FRAME_RATE: Stream frame rate (default: 10)
+	•  FRAME_RATE: Stream frame rate (default: 10). Lower values (e.g. 5) reduce CPU at the cost of less smooth video.
+
+	•  SCREENSHOT_QUALITY: JPEG quality for screen capture, 1–100 (default: 80). Lower values reduce CPU and bandwidth; 60–80 is usually fine for weather graphics.
 
 	•  CHANNEL_NUMBER: Sets the channel number (default: 275)
+
+
+## Lazy stream start (on-demand)
+
+The container does **not** start the browser or take screenshots until someone requests the stream. When the first request hits the playlist (`/playlist.m3u`) or the HLS stream (`/stream/stream.m3u8`), ws4channels starts Chromium, loads WS4KP, and begins capturing. Until then, CPU usage stays minimal. This is useful when the stream is only watched occasionally (e.g. Channels DVR tuning in only when a user watches).
+
+
+## Reducing CPU and Memory Usage
+
+Besides Docker limits (`--memory`, `--cpus`), you can tune the application itself:
+
+1. **Lower frame rate** – Set `FRAME_RATE=5` (or 6–8) for a weather stream; 10 fps is often more than needed and uses more CPU.
+2. **Lower screenshot quality** – Set `SCREENSHOT_QUALITY=60` to reduce work for Chromium and FFmpeg with little visible impact on the weather display.
+3. **Chromium is already tuned** – The app launches headless Chromium with flags that disable GPU, extensions, background timers, and other features that aren’t needed for a single static page, which reduces CPU and memory compared to default Chromium.
+
+Example using a ws4kp permalink (paste the full URL from “Copy Permalink” in ws4kp):
+
+```bash
+docker run -d \
+  --name ws4channels \
+  --restart unless-stopped \
+  --memory="1096m" \
+  --cpus="1.0" \
+  -p 9798:9798 \
+  -e WS4KP_HOST=ws4kp_host \
+  -e WS4KP_PORT=ws4kp_port \
+  -e "WS4KP_PERMALINK=https://weatherstar.netbymatt.com/?kiosk=true&settings-units-select=metric&latLonQuery=Orlando+International+Airport&..." \
+  ghcr.io/rice9797/ws4channels:latest
+```
+
+When `WS4KP_PERMALINK` is set, you can omit `ZIP_CODE`; the permalink defines location and all display options.
  
 
 ##  Hardware Acceleration Support

@@ -5,6 +5,7 @@ const path = require('path');
 const fs = require('fs');
 const { PassThrough } = require('stream');
 const os = require('os');
+const { URL } = require('url');
 
 const app = express();
 
@@ -12,9 +13,26 @@ const ZIP_CODE = process.env.ZIP_CODE || '90210';
 const WS4KP_HOST = process.env.WS4KP_HOST || 'localhost';
 const WS4KP_PORT = process.env.WS4KP_PORT || '8080';
 const STREAM_PORT = process.env.STREAM_PORT || '9798';
-const WS4KP_URL = `http://${WS4KP_HOST}:${WS4KP_PORT}`;
+const WS4KP_BASE_URL = `http://${WS4KP_HOST}:${WS4KP_PORT}`;
+const WS4KP_PERMALINK = (process.env.WS4KP_PERMALINK || '').trim();
+const WS4KP_URL = (function () {
+  if (!WS4KP_PERMALINK) return WS4KP_BASE_URL;
+  try {
+    if (/^https?:\/\//i.test(WS4KP_PERMALINK)) {
+      const u = new URL(WS4KP_PERMALINK);
+      const pathname = u.pathname || '/';
+      const search = u.search || '';
+      return `${WS4KP_BASE_URL}${pathname === '/' ? '' : pathname}${search}`;
+    }
+    const q = WS4KP_PERMALINK.replace(/^\?/, '');
+    return `${WS4KP_BASE_URL}/?${q}`;
+  } catch {
+    return WS4KP_BASE_URL;
+  }
+})();
 const HLS_SETUP_DELAY = 2000;
 const FRAME_RATE = process.env.FRAME_RATE || 10;
+const SCREENSHOT_QUALITY = Math.min(100, Math.max(1, parseInt(process.env.SCREENSHOT_QUALITY || '80', 10)));
 const chnlNum = process.env.CHANNEL_NUMBER || '275';
 
 const OUTPUT_DIR = path.join(__dirname, 'output');
@@ -27,6 +45,21 @@ const HLS_FILE = path.join(OUTPUT_DIR, 'stream.m3u8');
   if (!fs.existsSync(dir)) fs.mkdirSync(dir);
 });
 
+function ensureTranscodingStarted() {
+  if (ffmpegProc || browser || transcodingStarting) return;
+  transcodingStarting = true;
+  startTranscoding()
+    .then(() => { transcodingStarting = false; })
+    .catch((err) => {
+      console.error('Failed to start transcoding:', err);
+      transcodingStarting = false;
+    });
+}
+
+app.use('/stream', (req, res, next) => {
+  ensureTranscodingStarted();
+  next();
+});
 app.use('/stream', express.static(OUTPUT_DIR));
 app.use('/logo', express.static(LOGO_DIR));
 
@@ -132,29 +165,54 @@ async function startBrowser() {
     args: [
       '--no-sandbox',
       '--disable-setuid-sandbox',
+      '--disable-dev-shm-usage',
       '--disable-infobars',
       '--ignore-certificate-errors',
-      '--window-size=1280,720'
+      '--window-size=1280,720',
+      // Reduce CPU/memory in headless (no GPU in container)
+      '--disable-gpu',
+      '--disable-software-rasterizer',
+      '--disable-extensions',
+      '--disable-background-networking',
+      '--disable-background-timer-throttling',
+      '--disable-backgrounding-occluded-windows',
+      '--disable-renderer-backgrounding',
+      '--disable-breakpad',
+      '--disable-component-update',
+      '--disable-domain-reliance',
+      '--disable-sync',
+      '--disable-default-apps',
+      '--no-first-run',
+      '--metrics-recording-only',
+      '--mute-audio',
+      '--no-zygote',
+      '--disable-features=TranslateUI',
+      '--memory-pressure-off'
     ],
     defaultViewport: null
   });
 
   page = await browser.newPage();
+  if (WS4KP_PERMALINK) console.log('Loading WS4KP from permalink');
   await page.goto(WS4KP_URL, { waitUntil: 'networkidle2', timeout: 30000 });
 
-  try {
-    const zipInput = await page.waitForSelector('input[placeholder="Zip or City, State"], input', { timeout: 5000 });
-    if (zipInput) {
-      await zipInput.type(ZIP_CODE, { delay: 100 });
-      await waitFor(1000);
-      await page.keyboard.press('ArrowDown');
-      await waitFor(500);
-      const goButton = await page.$('button[type="submit"]');
-      if (goButton) await goButton.click();
-      else await zipInput.press('Enter');
-      await page.waitForSelector('div.weather-display, #weather-content', { timeout: 30000 });
-    }
-  } catch {}
+  if (!WS4KP_PERMALINK) {
+    try {
+      const zipInput = await page.waitForSelector('input[placeholder="Zip or City, State"], input', { timeout: 5000 });
+      if (zipInput) {
+        await zipInput.type(ZIP_CODE, { delay: 100 });
+        await waitFor(1000);
+        await page.keyboard.press('ArrowDown');
+        await waitFor(500);
+        const goButton = await page.$('button[type="submit"]');
+        if (goButton) await goButton.click();
+        else await zipInput.press('Enter');
+        await page.waitForSelector('div.weather-display, #weather-content', { timeout: 30000 });
+      }
+    } catch {}
+  } else {
+    await page.waitForSelector('div.weather-display, #weather-content', { timeout: 30000 }).catch(() => {});
+  }
 
   await page.setViewport({ width: 1280, height: 720 });
 }
@@ -215,6 +273,7 @@ async function startTranscoding() {
       }
       const screenshot = await page.screenshot({
         type: 'jpeg',
+        quality: SCREENSHOT_QUALITY,
         clip: { x: 4, y: 47, width: 631, height: 480 }
       });
       ffmpegStream.write(screenshot);
@@ -264,9 +323,8 @@ app.get('/health', (req, res) => {
 const { cpus, memoryMB } = getContainerLimits();
 console.log(`Running with ${cpus} CPU cores, ${memoryMB}MB RAM`);
 
-app.listen(STREAM_PORT, async () => {
-  console.log(`Streaming server running on port ${STREAM_PORT}`);
-  await startTranscoding();
+app.listen(STREAM_PORT, () => {
+  console.log(`Streaming server running on port ${STREAM_PORT} (stream starts on first request)`);
 });
 
 process.on('SIGINT', async () => {
